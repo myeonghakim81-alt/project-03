@@ -3,11 +3,22 @@ import type { Difficulty, RouteId, StageConfig } from "../types";
 import { getStage } from "../data/stages";
 import { DIFFICULTY_SETTINGS } from "../data/difficulty";
 import { calculateScore } from "../systems/score";
-import { drawLibrary, drawGreenhouse, type Rect, type RoomHotspots } from "./roomArt";
+import { drawLibrary, drawGreenhouse, type RoomLayout, type RoomObject, type RoomObjectKind } from "./roomArt";
 
 interface RoomInitData {
   stageId: string;
   difficulty: Difficulty;
+}
+
+const PLAYER_SPEED = 220; // px/sec
+const PLAYER_RADIUS = 14;
+const INTERACT_RADIUS = 66;
+
+function routeOfKind(kind: RoomObjectKind): RouteId | null {
+  if (kind === "clue" || kind === "lock") return "standard";
+  if (kind === "hidden") return "hidden";
+  if (kind === "alt") return "alternative";
+  return null;
 }
 
 function isAnnotated(route: RouteId, difficulty: Difficulty): boolean {
@@ -27,12 +38,19 @@ export class RoomScene extends Phaser.Scene {
   private enteredCode = "";
   private ended = false;
 
+  private layout!: RoomLayout;
+  private player!: Phaser.GameObjects.Container;
+  private moveTarget: { x: number; y: number } | null = null;
+  private activeObject: RoomObject | null = null;
+
   private timerText!: Phaser.GameObjects.Text;
   private hintText!: Phaser.GameObjects.Text;
   private messageText!: Phaser.GameObjects.Text;
   private codeDisplay!: Phaser.GameObjects.Text;
   private lockPanel!: Phaser.GameObjects.Container;
   private altPanel!: Phaser.GameObjects.Container;
+  private interactPrompt!: Phaser.GameObjects.Container;
+  private interactLabel!: Phaser.GameObjects.Text;
 
   constructor() {
     super("Room");
@@ -48,34 +66,36 @@ export class RoomScene extends Phaser.Scene {
     this.hintsLeft = settings.hintCount;
     this.enteredCode = "";
     this.ended = false;
+    this.moveTarget = null;
+    this.activeObject = null;
   }
 
   create() {
     const settings = DIFFICULTY_SETTINGS[this.difficulty];
-    this.cameras.main.setBackgroundColor("#1c1a24");
+    this.cameras.main.setBackgroundColor("#100e14");
 
     this.add
-      .text(this.scale.width / 2, 16, `FILE NO.${String(this.stage.fileNo).padStart(2, "0")} — ${this.stage.title} · ${settings.label}`, {
+      .text(this.scale.width / 2, 12, `FILE NO.${String(this.stage.fileNo).padStart(2, "0")} — ${this.stage.title} · ${settings.label}`, {
         fontFamily: "Georgia, serif",
         fontSize: "18px",
         color: "#e8c07d",
       })
       .setOrigin(0.5, 0)
-      .setDepth(10);
+      .setDepth(30);
 
     this.timerText = this.add
-      .text(this.scale.width - 16, 14, "", { fontFamily: "monospace", fontSize: "24px", color: "#fff" })
+      .text(this.scale.width - 16, 10, "", { fontFamily: "monospace", fontSize: "24px", color: "#fff" })
       .setOrigin(1, 0)
-      .setDepth(10);
+      .setDepth(30);
 
     this.hintText = this.add
-      .text(16, 16, "", { fontFamily: "monospace", fontSize: "13px", color: "#9fd3ff" })
-      .setDepth(10);
-    const hintBtn = this.makeSmallButton(16, 38, 100, 24, "힌트 사용");
+      .text(16, 12, "", { fontFamily: "monospace", fontSize: "13px", color: "#9fd3ff" })
+      .setDepth(30);
+    const hintBtn = this.makeSmallButton(16, 34, 100, 24, "힌트 사용");
     hintBtn.on("pointerdown", () => this.useHint());
 
     this.messageText = this.add
-      .text(this.scale.width / 2, this.scale.height - 20, this.stage.intro, {
+      .text(this.scale.width / 2, this.scale.height - 8, "이동할 곳을 클릭해서 캐릭터를 움직여 보세요.", {
         fontFamily: "sans-serif",
         fontSize: "13px",
         color: "#e8c07d",
@@ -83,13 +103,50 @@ export class RoomScene extends Phaser.Scene {
         align: "center",
       })
       .setOrigin(0.5, 1)
-      .setDepth(10);
+      .setDepth(30);
 
-    const hotspots = this.drawScene();
-    this.setupClueSpot(hotspots.clue);
-    this.setupLockSpot(hotspots.lock);
-    this.setupHiddenSpot(hotspots.hidden);
-    this.setupAltSpot(hotspots.alt);
+    this.layout = this.stage.id === "file-02" ? drawGreenhouse(this) : drawLibrary(this);
+
+    // 오브젝트별 난이도 안내(테두리)
+    this.layout.objects.forEach((obj) => {
+      const route = routeOfKind(obj.kind);
+      if (route && isAnnotated(route, this.difficulty)) {
+        this.add
+          .rectangle(obj.rect.x + obj.rect.w / 2, obj.rect.y + obj.rect.h / 2, obj.rect.w + 8, obj.rect.h + 8)
+          .setStrokeStyle(2, 0xe8c07d, 0.8)
+          .setDepth(5);
+      }
+    });
+
+    // 캐릭터
+    this.player = this.createPlayer(this.layout.playerStart.x, this.layout.playerStart.y);
+
+    // 바닥 클릭 -> 이동
+    const floor = this.layout.floor;
+    const floorZone = this.add
+      .zone(floor.x + floor.w / 2, floor.y + floor.h / 2, floor.w, floor.h)
+      .setOrigin(0.5)
+      .setInteractive();
+    floorZone.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      if (this.lockPanel.visible || this.altPanel.visible || this.ended) return;
+      this.moveTarget = this.clampToFloor(pointer.x, pointer.y);
+    });
+
+    // 상호작용 프롬프트
+    this.interactLabel = this.add
+      .text(0, 0, "🔍 조사하기", {
+        fontFamily: "sans-serif",
+        fontSize: "13px",
+        color: "#100e14",
+        backgroundColor: "#e8c07d",
+        padding: { x: 8, y: 4 },
+      })
+      .setOrigin(0.5, 1);
+    this.interactLabel.setInteractive({ useHandCursor: true });
+    this.interactLabel.on("pointerdown", () => this.tryInteract());
+    this.interactPrompt = this.add.container(0, 0, [this.interactLabel]).setDepth(25).setVisible(false);
+
+    this.input.keyboard?.on("keydown-SPACE", () => this.tryInteract());
 
     this.buildLockPanel();
     this.buildAltPanel();
@@ -100,6 +157,7 @@ export class RoomScene extends Phaser.Scene {
 
   update(_time: number, delta: number) {
     if (this.ended) return;
+
     this.remainingMs -= delta;
     if (this.remainingMs <= 0) {
       this.remainingMs = 0;
@@ -108,28 +166,89 @@ export class RoomScene extends Phaser.Scene {
       return;
     }
     this.updateTimerText();
+
+    this.updateMovement(delta);
+    this.updateInteractPrompt();
   }
 
-  private drawScene(): RoomHotspots {
-    return this.stage.id === "file-02" ? drawGreenhouse(this) : drawLibrary(this);
+  // ---------- 캐릭터 & 이동 ----------
+  private createPlayer(x: number, y: number): Phaser.GameObjects.Container {
+    const shadow = this.add.ellipse(0, 10, 26, 12, 0x000000, 0.35);
+    const body = this.add.circle(0, 0, PLAYER_RADIUS, 0xe8c07d);
+    const face = this.add.circle(0, -3, 3, 0x100e14);
+    return this.add.container(x, y, [shadow, body, face]).setDepth(15);
   }
 
-  // ---------- 정석 1단계: 단서 조사 ----------
-  private setupClueSpot(rect: Rect) {
-    const zone = this.addHotspot(rect, "standard");
-    zone.on("pointerdown", () => {
-      this.showMessage(this.stage.routes.standard.clue);
-    });
+  private clampToFloor(x: number, y: number) {
+    const f = this.layout.floor;
+    return {
+      x: Phaser.Math.Clamp(x, f.x + PLAYER_RADIUS, f.x + f.w - PLAYER_RADIUS),
+      y: Phaser.Math.Clamp(y, f.y + PLAYER_RADIUS, f.y + f.h - PLAYER_RADIUS),
+    };
   }
 
-  // ---------- 정석 2단계: 코드 입력 ----------
-  private setupLockSpot(rect: Rect) {
-    const zone = this.addHotspot(rect, "standard");
-    zone.on("pointerdown", () => {
-      this.lockPanel.setVisible(!this.lockPanel.visible);
-    });
+  private updateMovement(delta: number) {
+    if (!this.moveTarget) return;
+    const dx = this.moveTarget.x - this.player.x;
+    const dy = this.moveTarget.y - this.player.y;
+    const dist = Math.hypot(dx, dy);
+    const step = (PLAYER_SPEED * delta) / 1000;
+
+    if (dist <= step) {
+      this.player.setPosition(this.moveTarget.x, this.moveTarget.y);
+      this.moveTarget = null;
+    } else {
+      this.player.x += (dx / dist) * step;
+      this.player.y += (dy / dist) * step;
+    }
   }
 
+  private updateInteractPrompt() {
+    let nearest: RoomObject | null = null;
+    let nearestDist = INTERACT_RADIUS;
+
+    for (const obj of this.layout.objects) {
+      const d = Phaser.Math.Distance.Between(this.player.x, this.player.y, obj.point.x, obj.point.y);
+      if (d <= nearestDist) {
+        nearestDist = d;
+        nearest = obj;
+      }
+    }
+
+    this.activeObject = nearest;
+    if (nearest && !this.lockPanel.visible && !this.altPanel.visible) {
+      this.interactPrompt.setPosition(nearest.point.x, nearest.point.y - 24);
+      this.interactPrompt.setVisible(true);
+    } else {
+      this.interactPrompt.setVisible(false);
+    }
+  }
+
+  private tryInteract() {
+    if (this.ended || !this.activeObject || this.lockPanel.visible || this.altPanel.visible) return;
+    const obj = this.activeObject;
+
+    switch (obj.kind) {
+      case "clue":
+        this.showMessage(this.stage.routes.standard.clue);
+        break;
+      case "lock":
+        this.lockPanel.setVisible(true);
+        break;
+      case "hidden":
+        this.showMessage(`${this.stage.routes.hidden.label} 발견! ${this.stage.routes.hidden.description}`);
+        this.time.delayedCall(500, () => this.finish("hidden"));
+        break;
+      case "alt":
+        this.altPanel.setVisible(true);
+        break;
+      case "decoy":
+        this.showMessage(obj.decoyMessage ?? "별다른 특이사항은 없다.");
+        break;
+    }
+  }
+
+  // ---------- 정석 경로: 코드 입력 ----------
   private buildLockPanel() {
     const code = this.stage.routes.standard.code;
     const w = 260;
@@ -137,7 +256,7 @@ export class RoomScene extends Phaser.Scene {
     const x = this.scale.width / 2 - w / 2;
     const y = this.scale.height / 2 - h / 2;
 
-    const bg = this.add.rectangle(0, 0, w, h, 0x14141c, 0.96).setStrokeStyle(2, 0xe8c07d).setOrigin(0);
+    const bg = this.add.rectangle(0, 0, w, h, 0x14141c, 0.97).setStrokeStyle(2, 0xe8c07d).setOrigin(0);
     this.codeDisplay = this.add
       .text(w / 2, 16, `입력: ${"".padEnd(code.length, "_")}`, {
         fontFamily: "monospace",
@@ -146,7 +265,13 @@ export class RoomScene extends Phaser.Scene {
       })
       .setOrigin(0.5, 0);
 
-    const items: Phaser.GameObjects.GameObject[] = [bg, this.codeDisplay];
+    const closeBtn = this.add
+      .text(w - 14, 8, "✕", { fontFamily: "sans-serif", fontSize: "14px", color: "#aaa" })
+      .setOrigin(1, 0)
+      .setInteractive({ useHandCursor: true });
+    closeBtn.on("pointerdown", () => this.lockPanel.setVisible(false));
+
+    const items: Phaser.GameObjects.GameObject[] = [bg, this.codeDisplay, closeBtn];
     for (let n = 0; n <= 9; n++) {
       const bx = 14 + (n % 5) * 46;
       const by = 46 + Math.floor(n / 5) * 30;
@@ -166,7 +291,7 @@ export class RoomScene extends Phaser.Scene {
       items.push(btn, label);
     }
 
-    this.lockPanel = this.add.container(x, y, items).setDepth(20).setVisible(false);
+    this.lockPanel = this.add.container(x, y, items).setDepth(40).setVisible(false);
   }
 
   private submitCode(correctCode: string) {
@@ -180,51 +305,32 @@ export class RoomScene extends Phaser.Scene {
     }
   }
 
-  // ---------- 히든 경로 ----------
-  private setupHiddenSpot(rect: Rect) {
-    const zone = this.addHotspot(rect, "hidden");
-    zone.on("pointerdown", () => {
-      this.showMessage(`${this.stage.routes.hidden.label} 발견! ${this.stage.routes.hidden.description}`);
-      this.time.delayedCall(400, () => this.finish("hidden"));
-    });
-  }
-
   // ---------- 얼터너티브 경로 ----------
-  private setupAltSpot(rect: Rect) {
-    const zone = this.addHotspot(rect, "alternative");
-    zone.on("pointerdown", () => {
-      this.altPanel.setVisible(!this.altPanel.visible);
-    });
-  }
-
   private buildAltPanel() {
     const route = this.stage.routes.alternative;
     const annotated = isAnnotated("alternative", this.difficulty);
     const w = 280;
-    const h = annotated ? 130 : 90;
+    const h = annotated ? 140 : 100;
     const x = this.scale.width / 2 - w / 2;
     const y = this.scale.height / 2 - h / 2;
 
-    const bg = this.add.rectangle(0, 0, w, h, 0x14141c, 0.96).setStrokeStyle(2, 0xe8c07d).setOrigin(0);
+    const bg = this.add.rectangle(0, 0, w, h, 0x14141c, 0.97).setStrokeStyle(2, 0xe8c07d).setOrigin(0);
     const items: Phaser.GameObjects.GameObject[] = [bg];
 
-    if (annotated) {
-      const desc = this.add.text(14, 12, route.description, {
-        fontFamily: "sans-serif",
-        fontSize: "12px",
-        color: "#cfcfcf",
-        wordWrap: { width: w - 28 },
-      });
-      items.push(desc);
-    } else {
-      const desc = this.add.text(14, 12, "무언가를 조작해 볼 수 있을 것 같다. 확실친 않다.", {
-        fontFamily: "sans-serif",
-        fontSize: "12px",
-        color: "#cfcfcf",
-        wordWrap: { width: w - 28 },
-      });
-      items.push(desc);
-    }
+    const desc = this.add.text(
+      14,
+      12,
+      annotated ? route.description : "무언가를 조작해 볼 수 있을 것 같다. 확실친 않다.",
+      { fontFamily: "sans-serif", fontSize: "12px", color: "#cfcfcf", wordWrap: { width: w - 28 } }
+    );
+    items.push(desc);
+
+    const closeBtn = this.add
+      .text(w - 14, 8, "✕", { fontFamily: "sans-serif", fontSize: "14px", color: "#aaa" })
+      .setOrigin(1, 0)
+      .setInteractive({ useHandCursor: true });
+    closeBtn.on("pointerdown", () => this.altPanel.setVisible(false));
+    items.push(closeBtn);
 
     const attemptBtn = this.add.rectangle(14, h - 40, w - 28, 30, 0x44445a).setStrokeStyle(1, 0x888888).setOrigin(0);
     attemptBtn.setInteractive({ useHandCursor: true });
@@ -244,31 +350,17 @@ export class RoomScene extends Phaser.Scene {
     });
     items.push(attemptBtn, attemptLabel);
 
-    this.altPanel = this.add.container(x, y, items).setDepth(20).setVisible(false);
+    this.altPanel = this.add.container(x, y, items).setDepth(40).setVisible(false);
   }
 
   // ---------- 공용 유틸 ----------
-  private addHotspot(rect: Rect, route: RouteId): Phaser.GameObjects.Zone {
-    const cx = rect.x + rect.w / 2;
-    const cy = rect.y + rect.h / 2;
-    const zone = this.add.zone(cx, cy, rect.w, rect.h).setInteractive({ useHandCursor: true });
-
-    if (isAnnotated(route, this.difficulty)) {
-      const outline = this.add.rectangle(cx, cy, rect.w, rect.h).setStrokeStyle(2, 0xe8c07d, 0.8);
-      zone.on("pointerover", () => outline.setStrokeStyle(3, 0xffe6a8, 1));
-      zone.on("pointerout", () => outline.setStrokeStyle(2, 0xe8c07d, 0.8));
-    }
-
-    return zone;
-  }
-
   private makeSmallButton(x: number, y: number, w: number, h: number, label: string) {
-    const btn = this.add.rectangle(x, y, w, h, 0x44445a).setStrokeStyle(1, 0x888888).setOrigin(0).setDepth(10);
+    const btn = this.add.rectangle(x, y, w, h, 0x44445a).setStrokeStyle(1, 0x888888).setOrigin(0).setDepth(30);
     btn.setInteractive({ useHandCursor: true });
     this.add
       .text(x + w / 2, y + h / 2, label, { fontFamily: "sans-serif", fontSize: "12px", color: "#fff" })
       .setOrigin(0.5)
-      .setDepth(11);
+      .setDepth(31);
     btn.on("pointerover", () => btn.setFillStyle(0x5a5a75));
     btn.on("pointerout", () => btn.setFillStyle(0x44445a));
     return btn;
@@ -283,10 +375,7 @@ export class RoomScene extends Phaser.Scene {
       this.hintsUsed += 1;
       this.updateHintText();
       const code = this.stage.routes.standard.code;
-      this.enteredCode = code;
-      this.lockPanel.setVisible(true);
-      this.codeDisplay.setText(`입력: ${code}`);
-      this.submitCode(code);
+      this.showMessage(`힌트: 정석 경로의 코드는 '${code}'인 것 같다. 잠금장치를 찾아 직접 입력해 보자.`);
     };
 
     if (settings.hintRequiresAd) {
@@ -324,6 +413,7 @@ export class RoomScene extends Phaser.Scene {
   private finish(route: RouteId | null) {
     if (this.ended) return;
     this.ended = true;
+    this.interactPrompt.setVisible(false);
 
     const remainingSec = Math.ceil(this.remainingMs / 1000);
     const cleared = route !== null;
