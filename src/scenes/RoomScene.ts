@@ -3,7 +3,7 @@ import type { Difficulty, RouteId, StageConfig } from "../types";
 import { getStage } from "../data/stages";
 import { DIFFICULTY_SETTINGS } from "../data/difficulty";
 import { calculateScore } from "../systems/score";
-import { LIBRARY_WALLS, GREENHOUSE_WALLS, type WallLayout, type RoomObject, type RoomObjectKind } from "./roomArt";
+import { LIBRARY_WALLS, GREENHOUSE_WALLS, WALL_W, WALL_H, type WallLayout, type RoomObject, type RoomObjectKind } from "./roomArt";
 
 interface RoomInitData {
   stageId: string;
@@ -13,6 +13,16 @@ interface RoomInitData {
 const PLAYER_SPEED = 220; // px/sec
 const PLAYER_RADIUS = 14;
 const INTERACT_RADIUS = 66;
+
+// 벽 3개(왼쪽 미리보기/가운데 활성/오른쪽 미리보기)를 한 화면에 배치하기 위한 상수
+const TOP_Y = 66;
+const CENTER_DISPLAY_W = 440;
+const CENTER_SCALE = CENTER_DISPLAY_W / WALL_W;
+const SIDE_DISPLAY_W = (1000 - CENTER_DISPLAY_W) / 2;
+const SIDE_SCALE_X = SIDE_DISPLAY_W / WALL_W;
+const CENTER_X = (1000 - CENTER_DISPLAY_W) / 2;
+const LEFT_X = 0;
+const RIGHT_X = 1000 - SIDE_DISPLAY_W;
 
 function routeOfKind(kind: RoomObjectKind): RouteId | null {
   if (kind === "clue" || kind === "lock") return "standard";
@@ -41,7 +51,9 @@ export class RoomScene extends Phaser.Scene {
   private ended = false;
 
   private layout!: WallLayout;
-  private wallContainer!: Phaser.GameObjects.Container;
+  private centerContainer!: Phaser.GameObjects.Container;
+  private leftContainer!: Phaser.GameObjects.Container;
+  private rightContainer!: Phaser.GameObjects.Container;
   private player!: Phaser.GameObjects.Container;
   private moveTarget: { x: number; y: number } | null = null;
   private activeObject: RoomObject | null = null;
@@ -55,7 +67,6 @@ export class RoomScene extends Phaser.Scene {
   private altPanel!: Phaser.GameObjects.Container;
   private interactPrompt!: Phaser.GameObjects.Container;
   private interactLabel!: Phaser.GameObjects.Text;
-  private floorZone!: Phaser.GameObjects.Zone;
 
   constructor() {
     super("Room");
@@ -123,10 +134,10 @@ export class RoomScene extends Phaser.Scene {
     this.makeRotateButton(this.scale.width - 56, this.scale.height - 56, "▶", () => this.rotateWall(1));
     this.makeRotateButton(56, this.scale.height - 56, "◀", () => this.rotateWall(-1));
 
-    // 캐릭터
-    this.player = this.createPlayer(this.scale.width / 2, 520);
+    // 캐릭터 (실제 위치는 renderWall에서 가운데 컨테이너 기준으로 잡음)
+    this.player = this.createPlayer(0, 0);
 
-    // 상호작용 프롬프트
+    // 상호작용 프롬프트 (가운데 컨테이너의 자식으로 옮겨 다니며 사용됨)
     this.interactLabel = this.add
       .text(0, 0, "🔍 조사하기", {
         fontFamily: "sans-serif",
@@ -138,7 +149,7 @@ export class RoomScene extends Phaser.Scene {
       .setOrigin(0.5, 1);
     this.interactLabel.setInteractive({ useHandCursor: true });
     this.interactLabel.on("pointerdown", () => this.tryInteract());
-    this.interactPrompt = this.add.container(0, 0, [this.interactLabel]).setDepth(25).setVisible(false);
+    this.interactPrompt = this.add.container(0, 0, [this.interactLabel]).setVisible(false);
 
     this.input.keyboard?.on("keydown-SPACE", () => this.tryInteract());
 
@@ -176,12 +187,40 @@ export class RoomScene extends Phaser.Scene {
   }
 
   private renderWall(index: number) {
-    this.wallContainer?.destroy(true);
+    // player/interactPrompt는 씬 전체에서 재사용하는 영속 오브젝트라
+    // 컨테이너를 destroy하기 전에 먼저 떼어내야 함(그대로 두면 destroy와 함께 파괴됨)
+    this.centerContainer?.remove([this.player, this.interactPrompt]);
+    this.leftContainer?.destroy(true);
+    this.centerContainer?.destroy(true);
+    this.rightContainer?.destroy(true);
 
-    const layout = this.wallDrawFns[index](this);
+    const count = this.wallDrawFns.length;
+    const leftLayout = this.wallDrawFns[(index - 1 + count) % count](this);
+    const centerLayout = this.wallDrawFns[index](this);
+    const rightLayout = this.wallDrawFns[(index + 1) % count](this);
+
+    // 양옆 벽: 미리보기용(비활성) — 살짝 좁게 압축해서 동시에 3벽이 보이게 함
+    this.leftContainer = this.add
+      .container(LEFT_X, TOP_Y, leftLayout.gameObjects)
+      .setScale(SIDE_SCALE_X, CENTER_SCALE)
+      .setAlpha(0.7)
+      .setDepth(0);
+    const leftZone = this.add.zone(WALL_W / 2, WALL_H / 2, WALL_W, WALL_H).setInteractive({ useHandCursor: true });
+    leftZone.on("pointerdown", () => this.rotateWall(-1));
+    this.leftContainer.add(leftZone);
+
+    this.rightContainer = this.add
+      .container(RIGHT_X, TOP_Y, rightLayout.gameObjects)
+      .setScale(SIDE_SCALE_X, CENTER_SCALE)
+      .setAlpha(0.7)
+      .setDepth(0);
+    const rightZone = this.add.zone(WALL_W / 2, WALL_H / 2, WALL_W, WALL_H).setInteractive({ useHandCursor: true });
+    rightZone.on("pointerdown", () => this.rotateWall(1));
+    this.rightContainer.add(rightZone);
+
+    // 가운데 벽: 실제로 캐릭터가 서서 상호작용하는 활성 벽
     const annotationRects: Phaser.GameObjects.GameObject[] = [];
-
-    layout.objects.forEach((obj) => {
+    centerLayout.objects.forEach((obj) => {
       const route = routeOfKind(obj.kind);
       if (route && isAnnotated(route, this.difficulty)) {
         const cx = obj.rect.x + obj.rect.w / 2;
@@ -192,27 +231,34 @@ export class RoomScene extends Phaser.Scene {
       }
     });
 
-    this.wallContainer = this.add.container(0, 0, [...layout.gameObjects, ...annotationRects]).setDepth(0);
-    this.layout = layout;
-    this.wallLabelText.setText(`[ ${index + 1}/${this.wallDrawFns.length} ] ${layout.label}`);
+    this.centerContainer = this.add
+      .container(CENTER_X, TOP_Y, [...centerLayout.gameObjects, ...annotationRects])
+      .setScale(CENTER_SCALE, CENTER_SCALE)
+      .setDepth(1);
 
-    // 캐릭터를 바닥 중앙으로, 이동 목표 초기화
-    this.player.setPosition(this.scale.width / 2, layout.floor.y + layout.floor.h / 2 + 10);
+    this.layout = centerLayout;
+    this.wallLabelText.setText(`[ ${index + 1}/${count} ] ${centerLayout.label}`);
+
+    // 캐릭터를 바닥 중앙으로 옮기고 가운데 컨테이너의 자식으로 재부모화
+    this.centerContainer.add(this.player);
+    this.player.setPosition(centerLayout.floor.x + centerLayout.floor.w / 2, centerLayout.floor.y + centerLayout.floor.h / 2);
     this.moveTarget = null;
     this.activeObject = null;
     this.interactPrompt.setVisible(false);
+    this.centerContainer.add(this.interactPrompt);
 
-    // 바닥 클릭 -> 이동 (이전 존 있으면 제거)
-    this.floorZone?.destroy();
-    const floor = layout.floor;
-    this.floorZone = this.add
+    // 바닥 클릭 -> 이동 (가운데 벽의 로컬 좌표계 기준)
+    const floor = centerLayout.floor;
+    const floorZone = this.add
       .zone(floor.x + floor.w / 2, floor.y + floor.h / 2, floor.w, floor.h)
       .setOrigin(0.5)
       .setInteractive();
-    this.floorZone.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+    floorZone.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
       if (this.lockPanel.visible || this.altPanel.visible || this.ended) return;
-      this.moveTarget = this.clampToFloor(pointer.x, pointer.y);
+      const local = this.centerContainer.pointToContainer(pointer) as Phaser.Math.Vector2;
+      this.moveTarget = this.clampToFloor(local.x, local.y);
     });
+    this.centerContainer.add(floorZone);
   }
 
   // ---------- 캐릭터 & 이동 ----------
