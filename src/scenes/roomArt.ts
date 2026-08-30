@@ -12,251 +12,466 @@ export type RoomObjectKind = "clue" | "lock" | "hidden" | "alt" | "decoy";
 export interface RoomObject {
   id: string;
   kind: RoomObjectKind;
-  /** 바닥에 그려지는 영역(그림용) */
+  /** 벽에 그려지는 영역(그림용, 화면 아무 곳이나 가능 — 예: 창문은 벽 높은 곳) */
   rect: Rect;
-  /** 캐릭터가 접근했는지 판정하는 기준점 */
+  /** 캐릭터가 서야 하는 바닥 위 지점(항상 FLOOR 범위 안) */
   point: { x: number; y: number };
-  /** decoy 오브젝트를 조사했을 때 보여줄 대사 (없으면 기본 문구) */
   decoyMessage?: string;
 }
 
-export interface RoomLayout {
+export interface WallLayout {
+  label: string;
   floor: Rect;
-  playerStart: { x: number; y: number };
   objects: RoomObject[];
+  /** 이 벽을 그리며 생성한 모든 표시 오브젝트 — 벽 전환 시 한 번에 정리하기 위함 */
+  gameObjects: Phaser.GameObjects.GameObject[];
 }
 
-export const FLOOR: Rect = { x: 40, y: 96, w: 920, h: 452 };
+export const FLOOR: Rect = { x: 60, y: 470, w: 880, h: 90 };
+const OUTLINE = 0x241f1a;
 
-function rectCenter(r: Rect) {
-  return { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+function quadPoint(p0: { x: number; y: number }, p1: { x: number; y: number }, p2: { x: number; y: number }, t: number) {
+  const mt = 1 - t;
+  return {
+    x: mt * mt * p0.x + 2 * mt * t * p1.x + t * t * p2.x,
+    y: mt * mt * p0.y + 2 * mt * t * p1.y + t * t * p2.y,
+  };
 }
 
-function drawFloorAndWalls(scene: Phaser.Scene, floorColor: number, wallColor: number, lineColor: number) {
+/** Graphics에 quadraticCurveTo가 없어서 직접 샘플링해 lineTo로 그린다 */
+function quadCurveTo(
+  g: Phaser.GameObjects.Graphics,
+  from: { x: number; y: number },
+  ctrl: { x: number; y: number },
+  to: { x: number; y: number },
+  segments = 12
+) {
+  for (let i = 1; i <= segments; i++) {
+    const p = quadPoint(from, ctrl, to, i / segments);
+    g.lineTo(p.x, p.y);
+  }
+}
+
+function drawBase(scene: Phaser.Scene, bucket: Phaser.GameObjects.GameObject[], wallColor: number, floorColor: number) {
   const g = scene.add.graphics();
+  bucket.push(g);
   g.fillStyle(wallColor, 1);
-  g.fillRoundedRect(FLOOR.x - 18, FLOOR.y - 18, FLOOR.w + 36, FLOOR.h + 36, 10);
+  g.fillRect(0, 0, 1000, FLOOR.y + 10);
+  g.lineStyle(4, OUTLINE, 1);
+  g.lineBetween(0, 26, 1000, 26);
+
   g.fillStyle(floorColor, 1);
-  g.fillRoundedRect(FLOOR.x, FLOOR.y, FLOOR.w, FLOOR.h, 6);
-  g.lineStyle(1, lineColor, 0.35);
-  for (let x = FLOOR.x; x <= FLOOR.x + FLOOR.w; x += 46) g.lineBetween(x, FLOOR.y, x, FLOOR.y + FLOOR.h);
-  for (let y = FLOOR.y; y <= FLOOR.y + FLOOR.h; y += 46) g.lineBetween(FLOOR.x, y, FLOOR.x + FLOOR.w, y);
+  g.fillRect(0, FLOOR.y - 20, 1000, 600 - (FLOOR.y - 20));
+  g.lineStyle(3, 0x00000030, 1);
+  for (let x = -60; x < 1050; x += 55) g.lineBetween(x, FLOOR.y - 20, x + 130, 600);
+  g.lineStyle(4, OUTLINE, 1);
+  g.lineBetween(0, FLOOR.y - 20, 1000, FLOOR.y - 20);
+
   return g;
 }
 
-/** FILE NO.01 — 서재 (탑다운) */
-export function drawLibrary(scene: Phaser.Scene): RoomLayout {
-  const g = drawFloorAndWalls(scene, 0x4a3626, 0x241a12, 0x2e2013);
+function groundShadow(g: Phaser.GameObjects.Graphics, x: number, y: number, w: number) {
+  g.fillStyle(0x000000, 0.18);
+  g.fillEllipse(x, y, w, 12);
+}
 
-  const objects: RoomObject[] = [];
+/** ============ FILE NO.01 — 서재: 벽 4개 ============ */
+
+function libraryWallClue(scene: Phaser.Scene): WallLayout {
+  const bucket: Phaser.GameObjects.GameObject[] = [];
+  const g = drawBase(scene, bucket, 0xa9c9c2, 0xc98a4b);
+
+  // 러그
+  g.fillStyle(0xe07a92, 1);
+  g.fillRoundedRect(340, FLOOR.y + 30, 340, 80, 16);
+  g.lineStyle(5, OUTLINE, 1);
+  g.strokeRoundedRect(340, FLOOR.y + 30, 340, 80, 16);
 
   // 책상 + 편지 (clue)
-  const deskRect: Rect = { x: 110, y: 150, w: 150, h: 90 };
-  g.fillStyle(0x5c4230, 1);
-  g.fillRoundedRect(deskRect.x, deskRect.y, deskRect.w, deskRect.h, 4);
-  g.lineStyle(2, 0x2e2013, 1);
-  g.strokeRoundedRect(deskRect.x, deskRect.y, deskRect.w, deskRect.h, 4);
-  g.fillStyle(0xece3cf, 1);
-  g.fillRect(deskRect.x + 18, deskRect.y + 18, 46, 32);
-  objects.push({ id: "desk", kind: "clue", rect: deskRect, point: rectCenter(deskRect) });
+  const deskRect: Rect = { x: 380, y: 300, w: 220, h: 90 };
+  groundShadow(g, 490, FLOOR.y + 20, 130);
+  g.fillStyle(0x3f6e68, 1);
+  g.fillRoundedRect(deskRect.x, deskRect.y + 40, deskRect.w, 60, 10);
+  g.lineStyle(5, OUTLINE, 1);
+  g.strokeRoundedRect(deskRect.x, deskRect.y + 40, deskRect.w, 60, 10);
+  g.fillStyle(0xfdf1c8, 1);
+  g.fillRoundedRect(deskRect.x + 68, deskRect.y, 84, 44, 4);
+  g.lineStyle(4, OUTLINE, 1);
+  g.strokeRoundedRect(deskRect.x + 68, deskRect.y, 84, 44, 4);
+  g.lineStyle(2, 0xc9b98a, 1);
+  for (let i = 0; i < 3; i++) g.lineBetween(deskRect.x + 78, deskRect.y + 12 + i * 9, deskRect.x + 142, deskRect.y + 12 + i * 9);
 
-  // 의자 (decoy)
-  const chairRect: Rect = { x: 130, y: 250, w: 44, h: 44 };
-  g.fillStyle(0x3a2a1c, 1);
-  g.fillRoundedRect(chairRect.x, chairRect.y, chairRect.w, chairRect.h, 6);
-  g.lineStyle(2, 0x1c130c, 1);
-  g.lineBetween(chairRect.x + 8, chairRect.y + 8, chairRect.x + chairRect.w - 8, chairRect.y + chairRect.h - 8);
-  g.lineBetween(chairRect.x + chairRect.w - 8, chairRect.y + 8, chairRect.x + 8, chairRect.y + chairRect.h - 8);
-  objects.push({
-    id: "chair",
-    kind: "decoy",
-    rect: chairRect,
-    point: rectCenter(chairRect),
-    decoyMessage: "그냥 낡은 나무 의자다.",
-  });
+  // decoy: 액자
+  const frameRect: Rect = { x: 130, y: 130, w: 90, h: 110 };
+  g.fillStyle(0x3c2a20, 1);
+  g.fillRect(frameRect.x, frameRect.y, frameRect.w, frameRect.h);
+  g.lineStyle(4, OUTLINE, 1);
+  g.strokeRect(frameRect.x, frameRect.y, frameRect.w, frameRect.h);
+  g.fillStyle(0xe8dcc0, 1);
+  g.fillRect(frameRect.x + 8, frameRect.y + 8, frameRect.w - 16, frameRect.h - 16);
+  g.fillStyle(0x7ba0d0, 1);
+  g.fillRect(frameRect.x + 14, frameRect.y + 14, frameRect.w - 28, (frameRect.h - 28) * 0.6);
 
-  // 책장 + 다이얼 금고 (lock) — 위쪽 벽
-  const lockRect: Rect = { x: 420, y: 100, w: 200, h: 70 };
-  g.fillStyle(0x3d2b1f, 1);
-  g.fillRect(lockRect.x, lockRect.y, lockRect.w, lockRect.h);
-  g.lineStyle(2, 0x1c130c, 1);
-  for (let i = 1; i < 6; i++) {
-    const lx = lockRect.x + (lockRect.w / 6) * i;
-    g.lineBetween(lx, lockRect.y, lx, lockRect.y + lockRect.h);
+  return {
+    label: "정면 — 책상",
+    floor: FLOOR,
+    gameObjects: bucket,
+    objects: [
+      { id: "desk", kind: "clue", rect: deskRect, point: { x: 490, y: FLOOR.y + 40 } },
+      {
+        id: "painting",
+        kind: "decoy",
+        rect: frameRect,
+        point: { x: 175, y: FLOOR.y + 40 },
+        decoyMessage: "풍경화 그림이다. 별다른 건 없다.",
+      },
+    ],
+  };
+}
+
+function libraryWallLock(scene: Phaser.Scene): WallLayout {
+  const bucket: Phaser.GameObjects.GameObject[] = [];
+  const g = drawBase(scene, bucket, 0xa9c9c2, 0xc98a4b);
+
+  // 다이얼 캐비닛(lock)
+  const cabRect: Rect = { x: 380, y: 270, w: 220, h: 160 };
+  groundShadow(g, 490, FLOOR.y + 15, 140);
+  g.fillStyle(0xc1503a, 1);
+  g.fillRoundedRect(cabRect.x, cabRect.y, cabRect.w, cabRect.h, 18);
+  g.lineStyle(6, OUTLINE, 1);
+  g.strokeRoundedRect(cabRect.x, cabRect.y, cabRect.w, cabRect.h, 18);
+  g.fillStyle(0xe8b23c, 1);
+  g.fillRoundedRect(cabRect.x + 16, cabRect.y + 16, 90, 60, 10);
+  g.fillRoundedRect(cabRect.x + 114, cabRect.y + 16, 90, 60, 10);
+  g.lineStyle(4, OUTLINE, 1);
+  g.strokeRoundedRect(cabRect.x + 16, cabRect.y + 16, 90, 60, 10);
+  g.strokeRoundedRect(cabRect.x + 114, cabRect.y + 16, 90, 60, 10);
+
+  const gemColors = [0x7b5fd1, 0x3f8ce0, 0x5aa564, 0xe8622c];
+  const dialY = cabRect.y + 100;
+  for (let i = 0; i < 4; i++) {
+    const gx = cabRect.x + 30 + i * 46;
+    g.fillStyle(0xfdf1c8, 1);
+    g.fillCircle(gx, dialY, 18);
+    g.lineStyle(3, OUTLINE, 1);
+    g.strokeCircle(gx, dialY, 18);
+    g.fillStyle(gemColors[i], 1);
+    g.fillCircle(gx, dialY, 11);
+    g.lineStyle(2, OUTLINE, 1);
+    g.strokeCircle(gx, dialY, 11);
   }
-  g.strokeRect(lockRect.x, lockRect.y, lockRect.w, lockRect.h);
-  const dial = rectCenter(lockRect);
-  g.fillStyle(0x151515, 1);
-  g.fillCircle(dial.x, dial.y, 18);
-  g.lineStyle(2, 0xc9a24a, 1);
-  g.strokeCircle(dial.x, dial.y, 18);
-  objects.push({ id: "bookshelf", kind: "lock", rect: lockRect, point: dial });
+  g.fillStyle(0x8a3626, 1);
+  g.fillRoundedRect(cabRect.x + 40, cabRect.y + 140, 140, 16, 8);
+  g.lineStyle(3, OUTLINE, 1);
+  g.strokeRoundedRect(cabRect.x + 40, cabRect.y + 140, 140, 16, 8);
 
-  // 창문 (alt) — 위쪽 벽, 책장 옆
-  const altRect: Rect = { x: 660, y: 100, w: 150, h: 50 };
-  g.fillStyle(0x203246, 1);
-  g.fillRect(altRect.x, altRect.y, altRect.w, altRect.h);
-  g.lineStyle(2, 0x1c130c, 1);
-  g.strokeRect(altRect.x, altRect.y, altRect.w, altRect.h);
-  g.lineBetween(altRect.x + altRect.w / 2, altRect.y, altRect.x + altRect.w / 2, altRect.y + altRect.h);
-  objects.push({
-    id: "window",
-    kind: "alt",
-    rect: altRect,
-    point: { x: rectCenter(altRect).x, y: altRect.y + altRect.h + 30 },
-  });
+  // decoy: 통(barrel)
+  const barrelRect: Rect = { x: 800, y: 340, w: 100, h: 120 };
+  groundShadow(g, 850, FLOOR.y + 15, 65);
+  g.fillStyle(0xc98a4b, 1);
+  g.fillRoundedRect(barrelRect.x, barrelRect.y, barrelRect.w, barrelRect.h, 20);
+  g.lineStyle(5, OUTLINE, 1);
+  g.strokeRoundedRect(barrelRect.x, barrelRect.y, barrelRect.w, barrelRect.h, 20);
+  g.lineBetween(barrelRect.x, barrelRect.y + 35, barrelRect.x + barrelRect.w, barrelRect.y + 35);
+  g.lineBetween(barrelRect.x, barrelRect.y + 80, barrelRect.x + barrelRect.w, barrelRect.y + 80);
 
-  // 화분 (decoy)
-  const potRect: Rect = { x: 850, y: 460, w: 60, h: 60 };
-  g.fillStyle(0x3a2a1c, 1);
-  g.fillRoundedRect(potRect.x + 10, potRect.y + 30, 40, 26, 4);
-  g.fillStyle(0x3f7a4a, 1);
-  g.fillCircle(rectCenter(potRect).x, potRect.y + 22, 22);
-  objects.push({
-    id: "plant",
-    kind: "decoy",
-    rect: potRect,
-    point: rectCenter(potRect),
-    decoyMessage: "잎이 마른 화분이다. 별다른 건 없다.",
-  });
+  return {
+    label: "오른쪽 벽 — 서랍장",
+    floor: FLOOR,
+    gameObjects: bucket,
+    objects: [
+      { id: "cabinet", kind: "lock", rect: cabRect, point: { x: 490, y: FLOOR.y + 30 } },
+      {
+        id: "barrel",
+        kind: "decoy",
+        rect: barrelRect,
+        point: { x: 850, y: FLOOR.y + 30 },
+        decoyMessage: "빈 나무 통이다.",
+      },
+    ],
+  };
+}
 
-  // 벽난로 + 히든 레버 — 오른쪽
-  const hiddenRect: Rect = { x: 790, y: 150, w: 130, h: 100 };
-  g.fillStyle(0x2a1e18, 1);
-  g.fillRoundedRect(hiddenRect.x, hiddenRect.y, hiddenRect.w, hiddenRect.h, 8);
-  g.fillStyle(0x120a08, 1);
-  g.fillEllipse(rectCenter(hiddenRect).x, rectCenter(hiddenRect).y, hiddenRect.w - 30, hiddenRect.h - 30);
-  g.fillStyle(0xd9822b, 0.8);
-  g.fillTriangle(
-    rectCenter(hiddenRect).x,
-    rectCenter(hiddenRect).y - 12,
-    rectCenter(hiddenRect).x - 10,
-    rectCenter(hiddenRect).y + 12,
-    rectCenter(hiddenRect).x + 10,
-    rectCenter(hiddenRect).y + 12
-  );
-  const knot = { x: hiddenRect.x + hiddenRect.w - 14, y: hiddenRect.y + 12 };
+function libraryWallHidden(scene: Phaser.Scene): WallLayout {
+  const bucket: Phaser.GameObjects.GameObject[] = [];
+  const g = drawBase(scene, bucket, 0xa9c9c2, 0xc98a4b);
+
+  // 벽난로(hidden)
+  const fireRect: Rect = { x: 420, y: 330, w: 160, h: 120 };
+  groundShadow(g, 500, FLOOR.y + 15, 100);
+  g.fillStyle(0x8a4a2c, 1);
+  g.fillRoundedRect(fireRect.x, fireRect.y, fireRect.w, fireRect.h, 16);
+  g.lineStyle(5, OUTLINE, 1);
+  g.strokeRoundedRect(fireRect.x, fireRect.y, fireRect.w, fireRect.h, 16);
   g.fillStyle(0x1c130c, 1);
-  g.fillCircle(knot.x, knot.y, 5);
-  objects.push({ id: "fireplace", kind: "hidden", rect: hiddenRect, point: knot });
-
-  // 궤짝 (decoy)
-  const trunkRect: Rect = { x: 550, y: 440, w: 110, h: 70 };
-  g.fillStyle(0x4a3626, 1);
-  g.fillRoundedRect(trunkRect.x, trunkRect.y, trunkRect.w, trunkRect.h, 6);
-  g.lineStyle(3, 0x8a7a5e, 1);
-  g.strokeRoundedRect(trunkRect.x, trunkRect.y, trunkRect.w, trunkRect.h, 6);
-  g.lineBetween(trunkRect.x, trunkRect.y + trunkRect.h / 2, trunkRect.x + trunkRect.w, trunkRect.y + trunkRect.h / 2);
-  objects.push({
-    id: "trunk",
-    kind: "decoy",
-    rect: trunkRect,
-    point: rectCenter(trunkRect),
-    decoyMessage: "낡은 옷가지뿐, 별다른 건 없다.",
-  });
-
-  return {
-    floor: FLOOR,
-    playerStart: { x: FLOOR.x + FLOOR.w / 2, y: FLOOR.y + FLOOR.h - 50 },
-    objects,
-  };
-}
-
-/** FILE NO.02 — 온실 (탑다운) */
-export function drawGreenhouse(scene: Phaser.Scene): RoomLayout {
-  const g = drawFloorAndWalls(scene, 0x24352b, 0x14201a, 0x2c4a3f);
-
-  const objects: RoomObject[] = [];
-
-  // 재배 일지 테이블 (clue)
-  const clueRect: Rect = { x: 100, y: 140, w: 140, h: 80 };
-  g.fillStyle(0x4a3a28, 1);
-  g.fillRoundedRect(clueRect.x, clueRect.y, clueRect.w, clueRect.h, 4);
-  g.fillStyle(0xd8c9a0, 1);
-  g.fillRect(clueRect.x + 40, clueRect.y + 18, 60, 40);
-  objects.push({ id: "journal-table", kind: "clue", rect: clueRect, point: rectCenter(clueRect) });
-
-  // 물뿌리개 (decoy)
-  const canRect: Rect = { x: 270, y: 160, w: 40, h: 40 };
-  g.fillStyle(0x6a7a6a, 1);
-  g.fillEllipse(rectCenter(canRect).x, rectCenter(canRect).y, 34, 26);
-  objects.push({
-    id: "watering-can",
-    kind: "decoy",
-    rect: canRect,
-    point: rectCenter(canRect),
-    decoyMessage: "빈 물뿌리개다.",
-  });
-
-  // 화분 배열 (lock) — 아래쪽 벽 전체
-  const lockRect: Rect = { x: 80, y: 470, w: 840, h: 60 };
-  g.fillStyle(0x3a2c1e, 1);
-  g.fillRect(lockRect.x, lockRect.y, lockRect.w, lockRect.h);
-  const plantColors = [0xd3565f, 0xe7b93b, 0xe9e4d0, 0xcf7fd8];
-  for (let i = 0; i < 10; i++) {
-    const px = lockRect.x + 40 + i * 82;
-    const py = lockRect.y + 30;
-    g.fillStyle(0x7a5a3a, 1);
-    g.fillCircle(px, py, 16);
-    g.fillStyle(plantColors[i % plantColors.length], 1);
-    g.fillCircle(px, py - 6, 7);
+  g.fillEllipse(fireRect.x + fireRect.w / 2, fireRect.y + 50, 55, 30);
+  const fireColors = [0xf2c84b, 0xe8622c];
+  for (let i = 0; i < 3; i++) {
+    const fx = fireRect.x + fireRect.w / 2 - 18 + i * 18;
+    g.fillStyle(fireColors[i % 2], 1);
+    g.beginPath();
+    g.moveTo(fx, fireRect.y + 65);
+    g.lineTo(fx - 6, fireRect.y + 40);
+    g.lineTo(fx + 6, fireRect.y + 45);
+    g.lineTo(fx + 10, fireRect.y + 65);
+    g.closePath();
+    g.fillPath();
   }
-  objects.push({ id: "flower-row", kind: "lock", rect: lockRect, point: rectCenter(lockRect) });
+  const knot = { x: fireRect.x + fireRect.w - 16, y: fireRect.y + 18 };
+  g.fillStyle(0x3a2a1c, 1);
+  g.fillCircle(knot.x, knot.y, 5);
 
-  // 온도조절기 (alt) — 오른쪽 벽
-  const altRect: Rect = { x: 850, y: 160, w: 70, h: 70 };
-  g.fillStyle(0xd8d2c2, 1);
-  g.fillCircle(rectCenter(altRect).x, rectCenter(altRect).y, 32);
-  g.lineStyle(2, 0x8a8270, 1);
-  g.strokeCircle(rectCenter(altRect).x, rectCenter(altRect).y, 32);
-  g.fillStyle(0xb5442e, 1);
-  g.fillCircle(rectCenter(altRect).x, rectCenter(altRect).y, 4);
-  objects.push({
-    id: "thermostat",
-    kind: "alt",
-    rect: altRect,
-    point: { x: rectCenter(altRect).x, y: altRect.y + altRect.h + 30 },
-  });
-
-  // 장식용 화분 (decoy)
-  const decoPotRect: Rect = { x: 700, y: 140, w: 50, h: 50 };
-  g.fillStyle(0x7a5a3a, 1);
-  g.fillCircle(rectCenter(decoPotRect).x, rectCenter(decoPotRect).y, 18);
-  g.fillStyle(0x3f7a4a, 1);
-  g.fillCircle(rectCenter(decoPotRect).x, rectCenter(decoPotRect).y - 12, 12);
-  objects.push({
-    id: "deco-pot",
-    kind: "decoy",
-    rect: decoPotRect,
-    point: rectCenter(decoPotRect),
-    decoyMessage: "관상용 화분이다. 별다른 건 없다.",
-  });
-
-  // 관수 배관 밸브 (hidden) — 왼쪽 아래 구석
-  const hiddenRect: Rect = { x: 60, y: 360, w: 60, h: 60 };
-  g.lineStyle(10, 0x555a5c, 1);
-  g.lineBetween(FLOOR.x, rectCenter(hiddenRect).y, hiddenRect.x + 30, rectCenter(hiddenRect).y);
-  g.fillStyle(0x8a8f90, 1);
-  g.fillCircle(rectCenter(hiddenRect).x, rectCenter(hiddenRect).y, 16);
-  g.lineStyle(2, 0x2a2c2c, 1);
-  g.strokeCircle(rectCenter(hiddenRect).x, rectCenter(hiddenRect).y, 16);
-  objects.push({ id: "valve", kind: "hidden", rect: hiddenRect, point: rectCenter(hiddenRect) });
-
-  // 벤치 (decoy)
-  const benchRect: Rect = { x: 420, y: 300, w: 130, h: 40 };
-  g.fillStyle(0x5c4a32, 1);
-  g.fillRoundedRect(benchRect.x, benchRect.y, benchRect.w, benchRect.h, 6);
-  objects.push({
-    id: "bench",
-    kind: "decoy",
-    rect: benchRect,
-    point: rectCenter(benchRect),
-    decoyMessage: "앉아서 쉬는 벤치다.",
-  });
+  // decoy: 스툴
+  const stoolRect: Rect = { x: 110, y: 400, w: 90, h: 70 };
+  groundShadow(g, 155, FLOOR.y + 15, 55);
+  g.fillStyle(0xe8b23c, 1);
+  g.fillRoundedRect(stoolRect.x, stoolRect.y + 40, 90, 24, 6);
+  g.lineStyle(4, OUTLINE, 1);
+  g.strokeRoundedRect(stoolRect.x, stoolRect.y + 40, 90, 24, 6);
+  g.fillStyle(0x3f6e68, 1);
+  g.fillRoundedRect(stoolRect.x + 12, stoolRect.y, 66, 40, 10);
+  g.lineStyle(4, OUTLINE, 1);
+  g.strokeRoundedRect(stoolRect.x + 12, stoolRect.y, 66, 40, 10);
 
   return {
+    label: "뒤쪽 벽 — 벽난로",
     floor: FLOOR,
-    playerStart: { x: FLOOR.x + FLOOR.w / 2, y: FLOOR.y + FLOOR.h - 90 },
-    objects,
+    gameObjects: bucket,
+    objects: [
+      { id: "fireplace", kind: "hidden", rect: fireRect, point: { x: 500, y: FLOOR.y + 30 } },
+      {
+        id: "stool",
+        kind: "decoy",
+        rect: stoolRect,
+        point: { x: 155, y: FLOOR.y + 30 },
+        decoyMessage: "낡은 나무 스툴이다.",
+      },
+    ],
   };
 }
+
+function libraryWallAlt(scene: Phaser.Scene): WallLayout {
+  const bucket: Phaser.GameObjects.GameObject[] = [];
+  const g = drawBase(scene, bucket, 0xa9c9c2, 0xc98a4b);
+
+  // 아치형 창문(alt)
+  const winRect: Rect = { x: 420, y: 150, w: 200, h: 200 };
+  groundShadow(g, 520, FLOOR.y + 15, 100);
+  g.fillStyle(0x3c2a20, 1);
+  g.beginPath();
+  g.moveTo(winRect.x, winRect.y + 140);
+  g.lineTo(winRect.x, winRect.y + 40);
+  g.arc(winRect.x + 100, winRect.y + 40, 100, Math.PI, 0, false);
+  g.lineTo(winRect.x + 200, winRect.y + 140);
+  g.closePath();
+  g.fillPath();
+  g.lineStyle(6, OUTLINE, 1);
+  g.strokePath();
+
+  g.fillStyle(0xfdf1c8, 1);
+  g.beginPath();
+  g.moveTo(winRect.x + 18, winRect.y + 132);
+  g.lineTo(winRect.x + 18, winRect.y + 45);
+  g.arc(winRect.x + 100, winRect.y + 45, 82, Math.PI, 0, false);
+  g.lineTo(winRect.x + 182, winRect.y + 132);
+  g.closePath();
+  g.fillPath();
+  g.lineStyle(4, OUTLINE, 1);
+  g.strokePath();
+
+  g.lineStyle(4, OUTLINE, 1);
+  g.lineBetween(winRect.x + 100, winRect.y - 27, winRect.x + 100, winRect.y + 132);
+  g.lineBetween(winRect.x + 18, winRect.y + 90, winRect.x + 182, winRect.y + 90);
+
+  const latchY = winRect.y + 105;
+  g.fillStyle(0xd9a441, 1);
+  g.fillRoundedRect(winRect.x + 88, latchY, 24, 26, 4);
+  g.lineStyle(3, OUTLINE, 1);
+  g.strokeRoundedRect(winRect.x + 88, latchY, 24, 26, 4);
+
+  // decoy: 자루
+  const sackRect: Rect = { x: 800, y: 380, w: 90, h: 90 };
+  groundShadow(g, 845, FLOOR.y + 15, 55);
+  g.fillStyle(0xe8dcc0, 1);
+  g.beginPath();
+  g.moveTo(sackRect.x, sackRect.y + 80);
+  quadCurveTo(g, { x: sackRect.x, y: sackRect.y + 80 }, { x: sackRect.x - 6, y: sackRect.y + 20 }, { x: sackRect.x + 45, y: sackRect.y });
+  quadCurveTo(g, { x: sackRect.x + 45, y: sackRect.y }, { x: sackRect.x + 96, y: sackRect.y + 20 }, { x: sackRect.x + 90, y: sackRect.y + 80 });
+  g.closePath();
+  g.fillPath();
+  g.lineStyle(4, OUTLINE, 1);
+  g.strokePath();
+
+  return {
+    label: "왼쪽 벽 — 창문",
+    floor: FLOOR,
+    gameObjects: bucket,
+    objects: [
+      { id: "window", kind: "alt", rect: winRect, point: { x: 520, y: FLOOR.y + 30 } },
+      {
+        id: "sack",
+        kind: "decoy",
+        rect: sackRect,
+        point: { x: 845, y: FLOOR.y + 30 },
+        decoyMessage: "곡물 자루다. 별다른 건 없다.",
+      },
+    ],
+  };
+}
+
+/** ============ FILE NO.02 — 온실: 벽 4개 ============ */
+
+function greenhouseWallClue(scene: Phaser.Scene): WallLayout {
+  const bucket: Phaser.GameObjects.GameObject[] = [];
+  const g = drawBase(scene, bucket, 0xbfe0d6, 0x8a6a3c);
+
+  const tableRect: Rect = { x: 400, y: 330, w: 200, h: 90 };
+  groundShadow(g, 500, FLOOR.y + 15, 120);
+  g.fillStyle(0x6b8f5a, 1);
+  g.fillRoundedRect(tableRect.x, tableRect.y + 30, tableRect.w, 60, 10);
+  g.lineStyle(5, OUTLINE, 1);
+  g.strokeRoundedRect(tableRect.x, tableRect.y + 30, tableRect.w, 60, 10);
+  g.fillStyle(0xfdf1c8, 1);
+  g.fillRoundedRect(tableRect.x + 60, tableRect.y, 80, 44, 4);
+  g.lineStyle(4, OUTLINE, 1);
+  g.strokeRoundedRect(tableRect.x + 60, tableRect.y, 80, 44, 4);
+
+  const canRect: Rect = { x: 160, y: 400, w: 60, h: 50 };
+  groundShadow(g, 190, FLOOR.y + 15, 45);
+  g.fillStyle(0x8fa9a3, 1);
+  g.fillEllipse(canRect.x + 30, canRect.y + 25, 55, 40);
+  g.lineStyle(4, OUTLINE, 1);
+  g.strokeEllipse(canRect.x + 30, canRect.y + 25, 55, 40);
+
+  return {
+    label: "정면 — 작업대",
+    floor: FLOOR,
+    gameObjects: bucket,
+    objects: [
+      { id: "journal-table", kind: "clue", rect: tableRect, point: { x: 500, y: FLOOR.y + 30 } },
+      { id: "watering-can", kind: "decoy", rect: canRect, point: { x: 190, y: FLOOR.y + 30 }, decoyMessage: "빈 물뿌리개다." },
+    ],
+  };
+}
+
+function greenhouseWallLock(scene: Phaser.Scene): WallLayout {
+  const bucket: Phaser.GameObjects.GameObject[] = [];
+  const g = drawBase(scene, bucket, 0xbfe0d6, 0x8a6a3c);
+
+  const rowRect: Rect = { x: 300, y: 380, w: 400, h: 90 };
+  groundShadow(g, 500, FLOOR.y + 15, 220);
+  g.fillStyle(0x6b4a30, 1);
+  g.fillRoundedRect(rowRect.x, rowRect.y + 40, rowRect.w, 40, 8);
+  g.lineStyle(5, OUTLINE, 1);
+  g.strokeRoundedRect(rowRect.x, rowRect.y + 40, rowRect.w, 40, 8);
+
+  const plantColors = [0xe07a92, 0xe8b23c, 0xfdf1c8, 0x7b5fd1, 0xe8622c];
+  for (let i = 0; i < 5; i++) {
+    const px = rowRect.x + 40 + i * 80;
+    g.fillStyle(0xc98a4b, 1);
+    g.fillCircle(px, rowRect.y + 40, 22);
+    g.lineStyle(4, OUTLINE, 1);
+    g.strokeCircle(px, rowRect.y + 40, 22);
+    g.fillStyle(0x5aa564, 1);
+    g.fillCircle(px, rowRect.y + 12, 16);
+    g.lineStyle(3, OUTLINE, 1);
+    g.strokeCircle(px, rowRect.y + 12, 16);
+    g.fillStyle(plantColors[i], 1);
+    g.fillCircle(px, rowRect.y + 2, 7);
+  }
+
+  const potRect: Rect = { x: 850, y: 380, w: 60, h: 60 };
+  groundShadow(g, 880, FLOOR.y + 15, 45);
+  g.fillStyle(0xc98a4b, 1);
+  g.fillCircle(880, 415, 20);
+  g.lineStyle(4, OUTLINE, 1);
+  g.strokeCircle(880, 415, 20);
+  g.fillStyle(0x5aa564, 1);
+  g.fillCircle(880, 390, 15);
+  g.lineStyle(3, OUTLINE, 1);
+  g.strokeCircle(880, 390, 15);
+
+  return {
+    label: "오른쪽 벽 — 화분들",
+    floor: FLOOR,
+    gameObjects: bucket,
+    objects: [
+      { id: "flower-row", kind: "lock", rect: rowRect, point: { x: 500, y: FLOOR.y + 30 } },
+      { id: "deco-pot", kind: "decoy", rect: potRect, point: { x: 880, y: FLOOR.y + 30 }, decoyMessage: "관상용 화분이다." },
+    ],
+  };
+}
+
+function greenhouseWallHidden(scene: Phaser.Scene): WallLayout {
+  const bucket: Phaser.GameObjects.GameObject[] = [];
+  const g = drawBase(scene, bucket, 0xbfe0d6, 0x8a6a3c);
+
+  const valveRect: Rect = { x: 440, y: 400, w: 100, h: 70 };
+  groundShadow(g, 490, FLOOR.y + 15, 70);
+  g.lineStyle(12, 0x8a8f90, 1);
+  g.lineBetween(300, 440, 470, 440);
+  g.fillStyle(0xb0b5b6, 1);
+  g.fillCircle(490, 440, 26);
+  g.lineStyle(4, OUTLINE, 1);
+  g.strokeCircle(490, 440, 26);
+  g.lineStyle(4, 0x4a4a4a, 1);
+  g.lineBetween(490 - 18, 440, 490 + 18, 440);
+  g.lineBetween(490, 440 - 18, 490, 440 + 18);
+
+  const benchRect: Rect = { x: 760, y: 420, w: 160, h: 40 };
+  groundShadow(g, 840, FLOOR.y + 15, 90);
+  g.fillStyle(0x6b8f5a, 1);
+  g.fillRoundedRect(benchRect.x, benchRect.y, benchRect.w, benchRect.h, 8);
+  g.lineStyle(5, OUTLINE, 1);
+  g.strokeRoundedRect(benchRect.x, benchRect.y, benchRect.w, benchRect.h, 8);
+
+  return {
+    label: "뒤쪽 벽 — 배관",
+    floor: FLOOR,
+    gameObjects: bucket,
+    objects: [
+      { id: "valve", kind: "hidden", rect: valveRect, point: { x: 490, y: FLOOR.y + 30 } },
+      { id: "bench", kind: "decoy", rect: benchRect, point: { x: 840, y: FLOOR.y + 30 }, decoyMessage: "앉아서 쉬는 벤치다." },
+    ],
+  };
+}
+
+function greenhouseWallAlt(scene: Phaser.Scene): WallLayout {
+  const bucket: Phaser.GameObjects.GameObject[] = [];
+  const g = drawBase(scene, bucket, 0xbfe0d6, 0x8a6a3c);
+
+  const dialRect: Rect = { x: 450, y: 200, w: 100, h: 100 };
+  groundShadow(g, 500, FLOOR.y + 15, 60);
+  g.fillStyle(0xfdf1c8, 1);
+  g.fillCircle(500, 250, 46);
+  g.lineStyle(5, OUTLINE, 1);
+  g.strokeCircle(500, 250, 46);
+  g.fillStyle(0xe8622c, 1);
+  g.fillCircle(500, 250, 6);
+  g.lineStyle(4, 0xe8622c, 1);
+  g.lineBetween(500, 250, 522, 232);
+
+  const doorRect: Rect = { x: 760, y: 260, w: 130, h: 210 };
+  groundShadow(g, 825, FLOOR.y + 15, 80);
+  g.fillStyle(0x6b4a30, 1);
+  g.fillRoundedRect(doorRect.x, doorRect.y, doorRect.w, doorRect.h, 10);
+  g.lineStyle(5, OUTLINE, 1);
+  g.strokeRoundedRect(doorRect.x, doorRect.y, doorRect.w, doorRect.h, 10);
+  g.fillStyle(0x3a2a1c, 1);
+  g.fillCircle(doorRect.x + 20, doorRect.y + 110, 15);
+  g.lineStyle(3, OUTLINE, 1);
+  g.strokeCircle(doorRect.x + 20, doorRect.y + 110, 15);
+
+  return {
+    label: "왼쪽 벽 — 온도조절기",
+    floor: FLOOR,
+    gameObjects: bucket,
+    objects: [
+      { id: "thermostat", kind: "alt", rect: dialRect, point: { x: 500, y: FLOOR.y + 30 } },
+      { id: "shed-door", kind: "decoy", rect: doorRect, point: { x: 825, y: FLOOR.y + 30 }, decoyMessage: "잠긴 창고 문이다. 열리지 않는다." },
+    ],
+  };
+}
+
+export const LIBRARY_WALLS = [libraryWallClue, libraryWallLock, libraryWallHidden, libraryWallAlt];
+export const GREENHOUSE_WALLS = [greenhouseWallClue, greenhouseWallLock, greenhouseWallHidden, greenhouseWallAlt];

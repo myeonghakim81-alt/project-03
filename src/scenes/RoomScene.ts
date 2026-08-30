@@ -3,7 +3,7 @@ import type { Difficulty, RouteId, StageConfig } from "../types";
 import { getStage } from "../data/stages";
 import { DIFFICULTY_SETTINGS } from "../data/difficulty";
 import { calculateScore } from "../systems/score";
-import { drawLibrary, drawGreenhouse, type RoomLayout, type RoomObject, type RoomObjectKind } from "./roomArt";
+import { LIBRARY_WALLS, GREENHOUSE_WALLS, type WallLayout, type RoomObject, type RoomObjectKind } from "./roomArt";
 
 interface RoomInitData {
   stageId: string;
@@ -30,6 +30,8 @@ function isAnnotated(route: RouteId, difficulty: Difficulty): boolean {
 export class RoomScene extends Phaser.Scene {
   private stage!: StageConfig;
   private difficulty!: Difficulty;
+  private wallDrawFns!: Array<(scene: Phaser.Scene) => WallLayout>;
+  private wallIndex = 0;
 
   private timeLimitSec = 0;
   private remainingMs = 0;
@@ -38,19 +40,22 @@ export class RoomScene extends Phaser.Scene {
   private enteredCode = "";
   private ended = false;
 
-  private layout!: RoomLayout;
+  private layout!: WallLayout;
+  private wallContainer!: Phaser.GameObjects.Container;
   private player!: Phaser.GameObjects.Container;
   private moveTarget: { x: number; y: number } | null = null;
   private activeObject: RoomObject | null = null;
 
   private timerText!: Phaser.GameObjects.Text;
   private hintText!: Phaser.GameObjects.Text;
+  private wallLabelText!: Phaser.GameObjects.Text;
   private messageText!: Phaser.GameObjects.Text;
   private codeDisplay!: Phaser.GameObjects.Text;
   private lockPanel!: Phaser.GameObjects.Container;
   private altPanel!: Phaser.GameObjects.Container;
   private interactPrompt!: Phaser.GameObjects.Container;
   private interactLabel!: Phaser.GameObjects.Text;
+  private floorZone!: Phaser.GameObjects.Zone;
 
   constructor() {
     super("Room");
@@ -59,6 +64,8 @@ export class RoomScene extends Phaser.Scene {
   init(data: RoomInitData) {
     this.stage = getStage(data.stageId);
     this.difficulty = data.difficulty;
+    this.wallDrawFns = this.stage.id === "file-02" ? GREENHOUSE_WALLS : LIBRARY_WALLS;
+    this.wallIndex = 0;
     const settings = DIFFICULTY_SETTINGS[this.difficulty];
     this.timeLimitSec = Math.round(this.stage.baseTimeLimitSec * settings.timeMultiplier);
     this.remainingMs = this.timeLimitSec * 1000;
@@ -78,59 +85,46 @@ export class RoomScene extends Phaser.Scene {
       .text(this.scale.width / 2, 12, `FILE NO.${String(this.stage.fileNo).padStart(2, "0")} — ${this.stage.title} · ${settings.label}`, {
         fontFamily: "Georgia, serif",
         fontSize: "18px",
-        color: "#e8c07d",
+        color: "#241f1a",
       })
       .setOrigin(0.5, 0)
       .setDepth(30);
 
     this.timerText = this.add
-      .text(this.scale.width - 16, 10, "", { fontFamily: "monospace", fontSize: "24px", color: "#fff" })
+      .text(this.scale.width - 16, 10, "", { fontFamily: "monospace", fontSize: "24px", color: "#241f1a" })
       .setOrigin(1, 0)
       .setDepth(30);
 
     this.hintText = this.add
-      .text(16, 12, "", { fontFamily: "monospace", fontSize: "13px", color: "#9fd3ff" })
+      .text(16, 12, "", { fontFamily: "monospace", fontSize: "13px", color: "#1c3550" })
       .setDepth(30);
     const hintBtn = this.makeSmallButton(16, 34, 100, 24, "힌트 사용");
     hintBtn.on("pointerdown", () => this.useHint());
 
+    this.wallLabelText = this.add
+      .text(this.scale.width / 2, 38, "", { fontFamily: "sans-serif", fontSize: "13px", color: "#3c2a20" })
+      .setOrigin(0.5, 0)
+      .setDepth(30);
+
     this.messageText = this.add
-      .text(this.scale.width / 2, this.scale.height - 8, "이동할 곳을 클릭해서 캐릭터를 움직여 보세요.", {
+      .text(this.scale.width / 2, this.scale.height - 8, "바닥을 클릭해서 이동, 화살표로 방을 둘러보세요.", {
         fontFamily: "sans-serif",
         fontSize: "13px",
-        color: "#e8c07d",
+        color: "#100e14",
+        backgroundColor: "#fdf1c8dd",
+        padding: { x: 10, y: 4 },
         wordWrap: { width: 900 },
         align: "center",
       })
       .setOrigin(0.5, 1)
       .setDepth(30);
 
-    this.layout = this.stage.id === "file-02" ? drawGreenhouse(this) : drawLibrary(this);
-
-    // 오브젝트별 난이도 안내(테두리)
-    this.layout.objects.forEach((obj) => {
-      const route = routeOfKind(obj.kind);
-      if (route && isAnnotated(route, this.difficulty)) {
-        this.add
-          .rectangle(obj.rect.x + obj.rect.w / 2, obj.rect.y + obj.rect.h / 2, obj.rect.w + 8, obj.rect.h + 8)
-          .setStrokeStyle(2, 0xe8c07d, 0.8)
-          .setDepth(5);
-      }
-    });
+    // 회전(벽 전환) 버튼
+    this.makeRotateButton(this.scale.width - 56, this.scale.height - 56, "▶", () => this.rotateWall(1));
+    this.makeRotateButton(56, this.scale.height - 56, "◀", () => this.rotateWall(-1));
 
     // 캐릭터
-    this.player = this.createPlayer(this.layout.playerStart.x, this.layout.playerStart.y);
-
-    // 바닥 클릭 -> 이동
-    const floor = this.layout.floor;
-    const floorZone = this.add
-      .zone(floor.x + floor.w / 2, floor.y + floor.h / 2, floor.w, floor.h)
-      .setOrigin(0.5)
-      .setInteractive();
-    floorZone.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
-      if (this.lockPanel.visible || this.altPanel.visible || this.ended) return;
-      this.moveTarget = this.clampToFloor(pointer.x, pointer.y);
-    });
+    this.player = this.createPlayer(this.scale.width / 2, 520);
 
     // 상호작용 프롬프트
     this.interactLabel = this.add
@@ -138,7 +132,7 @@ export class RoomScene extends Phaser.Scene {
         fontFamily: "sans-serif",
         fontSize: "13px",
         color: "#100e14",
-        backgroundColor: "#e8c07d",
+        backgroundColor: "#fdf1c8",
         padding: { x: 8, y: 4 },
       })
       .setOrigin(0.5, 1);
@@ -150,6 +144,8 @@ export class RoomScene extends Phaser.Scene {
 
     this.buildLockPanel();
     this.buildAltPanel();
+
+    this.renderWall(0);
 
     this.updateHintText();
     this.updateTimerText();
@@ -171,11 +167,59 @@ export class RoomScene extends Phaser.Scene {
     this.updateInteractPrompt();
   }
 
+  // ---------- 벽 회전 ----------
+  private rotateWall(delta: number) {
+    if (this.lockPanel.visible || this.altPanel.visible || this.ended) return;
+    const count = this.wallDrawFns.length;
+    this.wallIndex = (this.wallIndex + delta + count) % count;
+    this.renderWall(this.wallIndex);
+  }
+
+  private renderWall(index: number) {
+    this.wallContainer?.destroy(true);
+
+    const layout = this.wallDrawFns[index](this);
+    const annotationRects: Phaser.GameObjects.GameObject[] = [];
+
+    layout.objects.forEach((obj) => {
+      const route = routeOfKind(obj.kind);
+      if (route && isAnnotated(route, this.difficulty)) {
+        const cx = obj.rect.x + obj.rect.w / 2;
+        const cy = obj.rect.y + obj.rect.h / 2;
+        annotationRects.push(
+          this.add.rectangle(cx, cy, obj.rect.w + 10, obj.rect.h + 10).setStrokeStyle(3, 0xffe066, 0.95)
+        );
+      }
+    });
+
+    this.wallContainer = this.add.container(0, 0, [...layout.gameObjects, ...annotationRects]).setDepth(0);
+    this.layout = layout;
+    this.wallLabelText.setText(`[ ${index + 1}/${this.wallDrawFns.length} ] ${layout.label}`);
+
+    // 캐릭터를 바닥 중앙으로, 이동 목표 초기화
+    this.player.setPosition(this.scale.width / 2, layout.floor.y + layout.floor.h / 2 + 10);
+    this.moveTarget = null;
+    this.activeObject = null;
+    this.interactPrompt.setVisible(false);
+
+    // 바닥 클릭 -> 이동 (이전 존 있으면 제거)
+    this.floorZone?.destroy();
+    const floor = layout.floor;
+    this.floorZone = this.add
+      .zone(floor.x + floor.w / 2, floor.y + floor.h / 2, floor.w, floor.h)
+      .setOrigin(0.5)
+      .setInteractive();
+    this.floorZone.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      if (this.lockPanel.visible || this.altPanel.visible || this.ended) return;
+      this.moveTarget = this.clampToFloor(pointer.x, pointer.y);
+    });
+  }
+
   // ---------- 캐릭터 & 이동 ----------
   private createPlayer(x: number, y: number): Phaser.GameObjects.Container {
-    const shadow = this.add.ellipse(0, 10, 26, 12, 0x000000, 0.35);
-    const body = this.add.circle(0, 0, PLAYER_RADIUS, 0xe8c07d);
-    const face = this.add.circle(0, -3, 3, 0x100e14);
+    const shadow = this.add.ellipse(0, 10, 26, 12, 0x000000, 0.3);
+    const body = this.add.circle(0, 0, PLAYER_RADIUS, 0xe8622c).setStrokeStyle(3, 0x241f1a);
+    const face = this.add.circle(0, -3, 3, 0x241f1a);
     return this.add.container(x, y, [shadow, body, face]).setDepth(15);
   }
 
@@ -355,14 +399,24 @@ export class RoomScene extends Phaser.Scene {
 
   // ---------- 공용 유틸 ----------
   private makeSmallButton(x: number, y: number, w: number, h: number, label: string) {
-    const btn = this.add.rectangle(x, y, w, h, 0x44445a).setStrokeStyle(1, 0x888888).setOrigin(0).setDepth(30);
+    const btn = this.add.rectangle(x, y, w, h, 0xfdf1c8).setStrokeStyle(2, 0x241f1a).setOrigin(0).setDepth(30);
     btn.setInteractive({ useHandCursor: true });
     this.add
-      .text(x + w / 2, y + h / 2, label, { fontFamily: "sans-serif", fontSize: "12px", color: "#fff" })
+      .text(x + w / 2, y + h / 2, label, { fontFamily: "sans-serif", fontSize: "12px", color: "#241f1a" })
       .setOrigin(0.5)
       .setDepth(31);
-    btn.on("pointerover", () => btn.setFillStyle(0x5a5a75));
-    btn.on("pointerout", () => btn.setFillStyle(0x44445a));
+    btn.on("pointerover", () => btn.setFillStyle(0xffe066));
+    btn.on("pointerout", () => btn.setFillStyle(0xfdf1c8));
+    return btn;
+  }
+
+  private makeRotateButton(x: number, y: number, arrow: string, onClick: () => void) {
+    const btn = this.add.circle(x, y, 26, 0x5aa564).setStrokeStyle(3, 0x241f1a).setDepth(30);
+    btn.setInteractive({ useHandCursor: true });
+    this.add.text(x, y, arrow, { fontFamily: "sans-serif", fontSize: "20px", color: "#fff" }).setOrigin(0.5).setDepth(31);
+    btn.on("pointerover", () => btn.setFillStyle(0x6fc27a));
+    btn.on("pointerout", () => btn.setFillStyle(0x5aa564));
+    btn.on("pointerdown", onClick);
     return btn;
   }
 
@@ -391,7 +445,7 @@ export class RoomScene extends Phaser.Scene {
     const mm = Math.floor(totalSec / 60);
     const ss = totalSec % 60;
     this.timerText.setText(`${mm}:${String(ss).padStart(2, "0")}`);
-    this.timerText.setColor(totalSec <= 30 ? "#ff6b6b" : "#fff");
+    this.timerText.setColor(totalSec <= 30 ? "#c1503a" : "#241f1a");
   }
 
   private updateHintText() {
